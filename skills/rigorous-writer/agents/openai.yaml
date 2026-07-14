@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rigorous Writer"
+  short_description: "Research-led essays with rigorous reasoning and citations"
+  default_prompt: "Use $rigorous-writer to research and draft a rigorous Markdown essay."

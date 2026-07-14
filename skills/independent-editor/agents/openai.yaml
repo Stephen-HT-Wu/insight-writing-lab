@@ -1,0 +1,4 @@
+interface:
+  display_name: "Independent Editor"
+  short_description: "Independent evidence, logic, and insight review"
+  default_prompt: "Use $independent-editor to independently review this analytical draft."
