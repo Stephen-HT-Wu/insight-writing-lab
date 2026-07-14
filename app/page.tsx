@@ -8,6 +8,7 @@ type Workflow = {
   id: string; topic: string; brief: string; status: string; revision_count: number; title?: string; thesis?: string;
   markdown?: string; sources: Source[]; reviews: Review[]; unresolved: string[]; error?: string; updated_at: string;
 };
+type LiveEvent = { sequence: number; type: string; phase: string; content: string; created_at: string };
 
 const statusLabel: Record<string, string> = {
   queued: "排程中", researching: "研究資料", drafting: "撰寫初稿", researching_gaps: "補查疑點",
@@ -27,6 +28,8 @@ export default function Home() {
   const [selectedId, setSelectedId] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [liveDraft, setLiveDraft] = useState("");
+  const [liveEvents, setLiveEvents] = useState<LiveEvent[]>([]);
 
   const load = useCallback(async () => {
     try {
@@ -38,8 +41,24 @@ export default function Home() {
     } catch { /* local preview may not have D1 ready yet */ }
   }, []);
 
-  useEffect(() => { load(); const timer = setInterval(load, 4000); return () => clearInterval(timer); }, [load]);
+  useEffect(() => { const initial = window.setTimeout(load, 0); const timer = setInterval(load, 4000); return () => { clearTimeout(initial); clearInterval(timer); }; }, [load]);
   const selected = useMemo(() => items.find((item) => item.id === selectedId), [items, selectedId]);
+
+  useEffect(() => {
+    if (!selectedId) return;
+    const reset = window.setTimeout(() => { setLiveDraft(""); setLiveEvents([]); }, 0);
+    const stream = new EventSource(`/api/workflows/${selectedId}/events`);
+    const receive = (event: Event) => {
+      if (!(event instanceof MessageEvent)) return;
+      const item = JSON.parse(event.data) as LiveEvent;
+      setLiveEvents((current) => current.some((entry) => entry.sequence === item.sequence) ? current : [...current, item]);
+      if (item.type === "draft_reset") setLiveDraft("");
+      if (item.type === "draft_delta") setLiveDraft((current) => current + item.content);
+      if (item.type === "completed" || item.type === "error") { stream.close(); load(); }
+    };
+    ["status", "research", "draft_reset", "draft_delta", "review", "completed", "error"].forEach((type) => stream.addEventListener(type, receive));
+    return () => { clearTimeout(reset); stream.close(); };
+  }, [load, selectedId]);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -115,7 +134,15 @@ export default function Home() {
               <h2>{selected.title || selected.topic}</h2>
               {selected.thesis && <p className="thesis">{selected.thesis}</p>}
               {selected.error && <div className="error">{selected.error}</div>}
-              {selected.markdown ? <pre className="markdown">{selected.markdown}</pre> : <div className="working"><i></i><p>代理正在處理：{labelStatus(selected.status)}</p></div>}
+              {!selected.markdown && liveEvents.length > 0 && <div className="live-panel">
+                <div className="live-head"><span><i></i> LIVE</span><b>寫作動態</b></div>
+                <ol>{liveEvents.filter((event) => event.type !== "draft_delta" && event.type !== "draft_reset").slice(-6).map((event) => {
+                  let content = event.content;
+                  try { const parsed = JSON.parse(content) as { message?: string; summary?: string; decision?: string }; content = parsed.message || parsed.summary || parsed.decision || content; } catch { /* plain event text */ }
+                  return <li key={event.sequence}><time>{new Date(event.created_at).toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time><span>{content}</span></li>;
+                })}</ol>
+              </div>}
+              {selected.markdown ? <pre className="markdown">{selected.markdown}</pre> : liveDraft ? <pre className="markdown live-draft">{liveDraft}<span className="typing-cursor">▍</span></pre> : <div className="working"><i></i><p>代理正在處理：{labelStatus(selected.status)}</p></div>}
               {(selected.sources?.length > 0 || selected.reviews?.length > 0) && <div className="evidence-grid">
                 <section><h3>研究來源 <span>{selected.sources.length}</span></h3>{selected.sources.slice(0, 10).map((source) => <a key={source.url} href={source.url} target="_blank" rel="noreferrer"><b>{source.title}</b><small>{source.authority}</small></a>)}</section>
                 <section><h3>總編紀錄 <span>{selected.reviews.length}</span></h3>{selected.reviews.map((review, index) => <details key={index} open={index === selected.reviews.length - 1}><summary>第 {index + 1} 輪 · {review.decision}</summary><p>{review.summary}</p>{review.issues?.map((issue, i) => <p className="issue" key={i}><b>{issue.category}</b>{issue.problem}</p>)}</details>)}</section>

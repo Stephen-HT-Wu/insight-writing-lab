@@ -60,6 +60,13 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 .reader>h2 { font-size:clamp(30px,4vw,54px); line-height:1.25; margin:35px 0 18px; }
 .thesis { border-left:3px solid var(--rust); padding-left:18px; color:#555d58; font-size:17px; line-height:1.8; }
 .markdown { white-space:pre-wrap; word-break:break-word; background:transparent; font:16px/2 "Noto Serif TC","Songti TC",serif; margin:35px 0; padding:0; }
+.live-panel { margin:28px 0 0; border:1px solid var(--line); background:#f0ede4; padding:18px 20px; }
+.live-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; font:700 11px ui-monospace,monospace; color:#626963; }
+.live-head span { color:var(--rust); letter-spacing:.12em; }.live-head i { display:inline-block; width:7px; height:7px; margin-right:7px; border-radius:50%; background:var(--rust); animation:pulse 1.3s ease-in-out infinite; }
+.live-panel ol { list-style:none; padding:0; margin:0; }.live-panel li { display:grid; grid-template-columns:72px 1fr; gap:12px; padding:8px 0; border-top:1px solid #ddd7cb; font:12px/1.5 ui-sans-serif,system-ui; }.live-panel time { color:#92968f; font:10px ui-monospace,monospace; }
+.live-draft { padding-top:24px; border-top:1px solid var(--line); }.typing-cursor { color:var(--rust); animation:blink .8s steps(1) infinite; }
+@keyframes pulse { 50% { opacity:.35; transform:scale(.75); } }
+@keyframes blink { 50% { opacity:0; } }
 .working { min-height:300px; display:grid; place-content:center; justify-items:center; color:#69706b; font:13px ui-sans-serif,system-ui; }
 .working i { width:30px; height:30px; border:2px solid var(--line); border-top-color:var(--rust); border-radius:50%; animation:spin 1s linear infinite; }
 @keyframes spin { to { transform:rotate(360deg); } }

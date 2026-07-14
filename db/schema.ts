@@ -1,4 +1,4 @@
-import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const workflows = sqliteTable("workflows", {
   id: text("id").primaryKey(),
@@ -16,3 +16,13 @@ export const workflows = sqliteTable("workflows", {
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
+
+export const workflowEvents = sqliteTable("workflow_events", {
+  id: text("id").primaryKey(),
+  workflowId: text("workflow_id").notNull(),
+  sequence: integer("sequence").notNull(),
+  type: text("type").notNull(),
+  phase: text("phase").notNull(),
+  content: text("content").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (table) => [uniqueIndex("workflow_events_sequence_idx").on(table.workflowId, table.sequence)]);
