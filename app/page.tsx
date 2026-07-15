@@ -25,11 +25,33 @@ function labelStatus(status: string) {
   return statusLabel[status] || status;
 }
 
+function normalizeMarkdown(markdown: string) {
+  const unfenced = markdown
+    .replace(/^\s*```(?:markdown|md)\s*\n([\s\S]*?)\n```\s*$/i, "$1")
+    .replace(/\r\n?/g, "\n");
+  let insideFence = false;
+
+  return unfenced.split("\n").map((line) => {
+    if (/^\s*```/.test(line)) {
+      insideFence = !insideFence;
+      return line;
+    }
+    if (insideFence) return line;
+    return line.replace(/^(\s{0,3})(#{1,6})(?=\S)/, "$1$2 ");
+  }).join("\n");
+}
+
 function MarkdownPreview({ children, live = false }: { children: string; live?: boolean }) {
   return <div className={live ? "markdown-preview live-markdown" : "markdown-preview"}>
     <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
+      h1: ({ children: heading }) => <h1 className="md-title">{heading}</h1>,
+      h2: ({ children: heading }) => <h2 className="md-subtitle">{heading}</h2>,
+      h3: ({ children: heading }) => <h3 className="md-section-title">{heading}</h3>,
+      h4: ({ children: heading }) => <h4 className="md-minor-title">{heading}</h4>,
+      h5: ({ children: heading }) => <h5 className="md-minor-title">{heading}</h5>,
+      h6: ({ children: heading }) => <h6 className="md-minor-title">{heading}</h6>,
       a: ({ href, children: linkChildren }) => <a href={href} target="_blank" rel="noreferrer">{linkChildren}</a>,
-    }}>{children}</ReactMarkdown>
+    }}>{normalizeMarkdown(children)}</ReactMarkdown>
     {live && <span className="typing-cursor">▍</span>}
   </div>;
 }

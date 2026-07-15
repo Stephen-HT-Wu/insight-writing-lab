@@ -43,6 +43,9 @@ test("includes durable, resumable workflow steps and live streaming UI", async (
   assert.match(page, /draft_delta/);
   assert.match(page, /\/advance/);
   assert.match(page, /ReactMarkdown/);
+  assert.match(page, /normalizeMarkdown/);
+  assert.match(page, /md-title/);
+  assert.match(page, /md-subtitle/);
   assert.match(page, /草稿版本與總編意見/);
   assert.match(eventMigration, /CREATE TABLE `workflow_events`/);
   assert.match(eventMigration, /CREATE UNIQUE INDEX `workflow_events_sequence_idx`/);

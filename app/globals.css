@@ -61,8 +61,12 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 .thesis { border-left:3px solid var(--rust); padding-left:18px; color:#555d58; font-size:17px; line-height:1.8; }
 .markdown { white-space:pre-wrap; word-break:break-word; background:transparent; font:16px/2 "Noto Serif TC","Songti TC",serif; margin:35px 0; padding:0; }
 .markdown-preview { margin:35px 0; font-size:16px; line-height:2; overflow-wrap:anywhere; }
-.markdown-preview h1,.markdown-preview h2,.markdown-preview h3,.markdown-preview h4 { line-height:1.35; margin:1.6em 0 .65em; letter-spacing:-.02em; }
-.markdown-preview h1 { font-size:2em; }.markdown-preview h2 { font-size:1.55em; border-bottom:1px solid var(--line); padding-bottom:.35em; }.markdown-preview h3 { font-size:1.25em; }
+.markdown-preview h1,.markdown-preview h2,.markdown-preview h3,.markdown-preview h4,.markdown-preview h5,.markdown-preview h6 { color:var(--ink); font-weight:800; line-height:1.35; letter-spacing:-.025em; }
+.markdown-preview .md-title { margin:1.8em 0 .8em; padding-bottom:.45em; border-bottom:3px solid var(--rust); font-size:clamp(32px,4vw,48px); line-height:1.2; }
+.markdown-preview .md-subtitle { margin:1.8em 0 .7em; padding:0 0 .4em; border-bottom:1px solid var(--line); font-size:clamp(24px,3vw,32px); }
+.markdown-preview .md-section-title { margin:1.65em 0 .55em; font-size:clamp(19px,2.2vw,24px); }
+.markdown-preview .md-minor-title { margin:1.5em 0 .5em; font-size:16px; letter-spacing:0; }
+.markdown-preview>:first-child { margin-top:0; }
 .markdown-preview p { margin:1em 0; }.markdown-preview ul,.markdown-preview ol { padding-left:1.6em; }.markdown-preview li { margin:.35em 0; }
 .markdown-preview blockquote { margin:1.5em 0; padding:.3em 1.2em; border-left:3px solid var(--rust); color:#5e6660; background:#f0ede4; }
 .markdown-preview a { color:var(--rust); text-decoration:underline; text-underline-offset:3px; }
