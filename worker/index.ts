@@ -30,12 +30,13 @@ interface ExecutionContext {
 type Source = { title: string; url: string; content: string; score: number; authority: string };
 type WriterResult = { title: string; thesis: string; markdown: string; research_gaps: string[]; unresolved: string[] };
 type ReviewIssue = { severity: string; category: string; problem: string; required_change: string };
-type Review = { decision: "pass" | "minor_revision" | "major_revision"; summary: string; strengths: string[]; issues: ReviewIssue[]; research_queries: string[] };
+type Review = { decision: "pass" | "minor_revision" | "major_revision"; summary: string; strengths: string[]; issues: ReviewIssue[]; research_queries: string[]; draft_phase?: string };
+type DraftSnapshot = { phase: string; label: string; title: string; thesis: string; markdown: string; created_at: string };
 type WorkflowEventType = "status" | "research" | "draft_reset" | "draft_delta" | "review" | "completed" | "error";
 type WorkflowRow = {
   id: string; topic: string; brief: string; status: string; revision_count: number;
   title: string | null; thesis: string | null; markdown: string | null;
-  sources_json: string; reviews_json: string; unresolved_json: string; research_gaps_json: string;
+  sources_json: string; reviews_json: string; unresolved_json: string; research_gaps_json: string; drafts_json: string;
   lease_token: string | null; lease_expires_at: string | null; error: string | null;
 };
 
@@ -59,6 +60,7 @@ async function ensureDb(db: D1Database) {
       reviews_json TEXT NOT NULL DEFAULT '[]',
       unresolved_json TEXT NOT NULL DEFAULT '[]',
       research_gaps_json TEXT NOT NULL DEFAULT '[]',
+      drafts_json TEXT NOT NULL DEFAULT '[]',
       lease_token TEXT,
       lease_expires_at TEXT,
       error TEXT,
@@ -94,10 +96,12 @@ function rowToWorkflow(row: Record<string, unknown>) {
     reviews: JSON.parse(String(row.reviews_json || "[]")),
     unresolved: JSON.parse(String(row.unresolved_json || "[]")),
     research_gaps: JSON.parse(String(row.research_gaps_json || "[]")),
+    drafts: JSON.parse(String(row.drafts_json || "[]")),
     sources_json: undefined,
     reviews_json: undefined,
     unresolved_json: undefined,
     research_gaps_json: undefined,
+    drafts_json: undefined,
     lease_token: undefined,
   };
 }
@@ -272,9 +276,12 @@ async function streamArticle(env: Env, id: string, phase: string, prompt: string
   return modelJsonStream<WriterResult>(env, writerInstructions, prompt, (delta) => emitEvent(env.DB, id, "draft_delta", phase, delta));
 }
 
-async function saveArticle(env: Env, id: string, article: WriterResult) {
-  await env.DB.prepare("UPDATE workflows SET title = ?, thesis = ?, markdown = ?, unresolved_json = ?, research_gaps_json = ?, updated_at = ? WHERE id = ?")
-    .bind(article.title, article.thesis, article.markdown, JSON.stringify(article.unresolved || []), JSON.stringify(article.research_gaps || []), new Date().toISOString(), id).run();
+async function saveArticle(env: Env, id: string, phase: string, label: string, article: WriterResult) {
+  const current = await env.DB.prepare("SELECT drafts_json FROM workflows WHERE id = ?").bind(id).first<{ drafts_json: string }>();
+  const snapshot: DraftSnapshot = { phase, label, title: article.title, thesis: article.thesis, markdown: article.markdown, created_at: new Date().toISOString() };
+  const drafts = [...parseArray<DraftSnapshot>(current?.drafts_json).filter((draft) => draft.phase !== phase), snapshot];
+  await env.DB.prepare("UPDATE workflows SET title = ?, thesis = ?, markdown = ?, unresolved_json = ?, research_gaps_json = ?, drafts_json = ?, updated_at = ? WHERE id = ?")
+    .bind(article.title, article.thesis, article.markdown, JSON.stringify(article.unresolved || []), JSON.stringify(article.research_gaps || []), JSON.stringify(drafts), new Date().toISOString(), id).run();
 }
 
 async function finalizeWorkflow(env: Env, row: WorkflowRow) {
@@ -325,7 +332,7 @@ async function advanceWorkflow(env: Env, id: string) {
         await setStatus(env, id, "researching", "找不到已保存的研究資料，將重新研究");
       } else {
         const article = await streamArticle(env, id, "drafting", `TOPIC:\n${row.topic}\n\nBRIEF:\n${row.brief}\n\nEVIDENCE CARDS:\n${evidencePacket(sources)}`);
-        await saveArticle(env, id, article);
+        await saveArticle(env, id, "drafting", "初稿", article);
         await setStatus(env, id, article.research_gaps?.length ? "researching_gaps" : "editing_1", article.research_gaps?.length ? `初稿已保存；下一步補查 ${article.research_gaps.length} 個證據缺口` : "初稿已保存；下一步交由獨立總編審稿");
       }
     } else if (row.status === "researching_gaps") {
@@ -337,11 +344,13 @@ async function advanceWorkflow(env: Env, id: string) {
       await setStatus(env, id, "redrafting_with_evidence", "下一步將補充證據整合進文章");
     } else if (row.status === "redrafting_with_evidence") {
       const article = await streamArticle(env, id, row.status, `Rewrite the draft after resolving its research gaps.\n\nTOPIC:\n${row.topic}\n\nBRIEF:\n${row.brief}\n\nPRIOR DRAFT:\n${row.markdown || ""}\n\nEVIDENCE CARDS:\n${evidencePacket(sources)}`);
-      await saveArticle(env, id, article);
+      await saveArticle(env, id, "redrafting_with_evidence", "補證改寫", article);
       await setStatus(env, id, "editing_1", "證據版草稿已保存；下一步交由獨立總編審稿");
     } else if (/^editing_\d+$/.test(row.status)) {
       const round = Number(row.status.split("_")[1]);
       const review = await modelJson<Review>(env, editorInstructions, `TOPIC:\n${row.topic}\n\nARTICLE:\n${row.markdown || ""}\n\nAVAILABLE SOURCES:\n${evidencePacket(sources)}`);
+      const latestDraft = parseArray<DraftSnapshot>(row.drafts_json).at(-1);
+      review.draft_phase = latestDraft?.phase;
       reviews = [...reviews, review];
       await env.DB.prepare("UPDATE workflows SET reviews_json = ? WHERE id = ?").bind(JSON.stringify(reviews), id).run();
       await emitEvent(env.DB, id, "review", row.status, { decision: review.decision, summary: review.summary, issue_count: review.issues?.length || 0 });
@@ -364,7 +373,7 @@ async function advanceWorkflow(env: Env, id: string) {
       const round = Number(row.status.split("_")[1]);
       const review = reviews.at(-1);
       const article = await streamArticle(env, id, row.status, `Revise the article in response to the independent editor. Preserve sound reasoning; address substantive issues. This is revision ${round} of at most 3.\n\nTOPIC:\n${row.topic}\n\nBRIEF:\n${row.brief}\n\nCURRENT ARTICLE:\n${row.markdown || ""}\n\nEDITOR REVIEW:\n${JSON.stringify(review)}\n\nEVIDENCE CARDS:\n${evidencePacket(sources)}`);
-      await saveArticle(env, id, article);
+      await saveArticle(env, id, row.status, `第 ${round} 次修訂`, article);
       if (round >= 3) {
         row = { ...row, title: article.title, thesis: article.thesis, markdown: article.markdown, unresolved_json: JSON.stringify(article.unresolved || []), reviews_json: JSON.stringify(reviews), revision_count: round };
         await finalizeWorkflow(env, row);

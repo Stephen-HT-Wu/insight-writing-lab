@@ -1,12 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 type Source = { title: string; url: string; authority: string };
-type Review = { decision: string; summary: string; strengths: string[]; issues: Array<{ severity: string; category: string; problem: string; required_change: string }> };
+type Review = { decision: string; summary: string; strengths: string[]; issues: Array<{ severity: string; category: string; problem: string; required_change: string }>; draft_phase?: string };
+type DraftSnapshot = { phase: string; label: string; title: string; thesis: string; markdown: string; created_at: string };
 type Workflow = {
   id: string; topic: string; brief: string; status: string; revision_count: number; title?: string; thesis?: string;
-  markdown?: string; sources: Source[]; reviews: Review[]; unresolved: string[]; error?: string; updated_at: string;
+  markdown?: string; sources: Source[]; reviews: Review[]; drafts: DraftSnapshot[]; unresolved: string[]; error?: string; updated_at: string;
 };
 type LiveEvent = { sequence: number; type: string; phase: string; content: string; created_at: string };
 
@@ -20,6 +23,15 @@ function labelStatus(status: string) {
   if (status.startsWith("researching_revision_")) return `修訂補查 ${status.split("_")[2]}`;
   if (status.startsWith("revising_")) return `作者修訂 ${status.split("_")[1]}`;
   return statusLabel[status] || status;
+}
+
+function MarkdownPreview({ children, live = false }: { children: string; live?: boolean }) {
+  return <div className={live ? "markdown-preview live-markdown" : "markdown-preview"}>
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
+      a: ({ href, children: linkChildren }) => <a href={href} target="_blank" rel="noreferrer">{linkChildren}</a>,
+    }}>{children}</ReactMarkdown>
+    {live && <span className="typing-cursor">▍</span>}
+  </div>;
 }
 
 export default function Home() {
@@ -159,7 +171,18 @@ export default function Home() {
                   return <li key={event.sequence}><time>{new Date(event.created_at).toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time><span>{content}</span></li>;
                 })}</ol>
               </div>}
-              {selected.markdown ? <pre className="markdown">{selected.markdown}</pre> : liveDraft ? <pre className="markdown live-draft">{liveDraft}<span className="typing-cursor">▍</span></pre> : <div className="working"><i></i><p>代理正在處理：{labelStatus(selected.status)}</p></div>}
+              {selected.markdown ? <MarkdownPreview>{selected.markdown}</MarkdownPreview> : liveDraft ? <MarkdownPreview live>{liveDraft}</MarkdownPreview> : <div className="working"><i></i><p>代理正在處理：{labelStatus(selected.status)}</p></div>}
+              {selected.drafts?.length > 0 && <section className="draft-history">
+                <div className="history-head"><span>VERSION HISTORY</span><h3>草稿版本與總編意見</h3><p>每個寫作者版本都完整保留，方便對照總編為何提出修改。</p></div>
+                {selected.drafts.map((draft, index) => {
+                  const review = selected.reviews.find((item) => item.draft_phase === draft.phase);
+                  return <details className="draft-version" key={draft.phase} open={index === selected.drafts.length - 1}>
+                    <summary><span>V{index + 1}</span><b>{draft.label}</b><time>{new Date(draft.created_at).toLocaleString("zh-TW")}</time></summary>
+                    <div className="draft-body"><MarkdownPreview>{draft.markdown}</MarkdownPreview></div>
+                    {review && <aside className="paired-review"><div><span>EDITOR REVIEW</span><b>{review.decision}</b></div><p>{review.summary}</p>{review.issues?.map((issue, issueIndex) => <p className="issue" key={issueIndex}><b>{issue.category}</b>{issue.problem}</p>)}</aside>}
+                  </details>;
+                })}
+              </section>}
               {(selected.sources?.length > 0 || selected.reviews?.length > 0) && <div className="evidence-grid">
                 <section><h3>研究來源 <span>{selected.sources.length}</span></h3>{selected.sources.slice(0, 10).map((source) => <a key={source.url} href={source.url} target="_blank" rel="noreferrer"><b>{source.title}</b><small>{source.authority}</small></a>)}</section>
                 <section><h3>總編紀錄 <span>{selected.reviews.length}</span></h3>{selected.reviews.map((review, index) => <details key={index} open={index === selected.reviews.length - 1}><summary>第 {index + 1} 輪 · {review.decision}</summary><p>{review.summary}</p>{review.issues?.map((issue, i) => <p className="issue" key={i}><b>{issue.category}</b>{issue.problem}</p>)}</details>)}</section>

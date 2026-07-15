@@ -1,0 +1,1 @@
+ALTER TABLE `workflows` ADD `drafts_json` text DEFAULT '[]' NOT NULL;

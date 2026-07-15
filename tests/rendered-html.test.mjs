@@ -25,11 +25,12 @@ test("server-renders the Insight Writing Lab product", async () => {
 });
 
 test("includes durable, resumable workflow steps and live streaming UI", async () => {
-  const [worker, page, eventMigration, leaseMigration] = await Promise.all([
+  const [worker, page, eventMigration, leaseMigration, draftMigration] = await Promise.all([
     readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../drizzle/0001_nifty_azazel.sql", import.meta.url), "utf8"),
     readFile(new URL("../drizzle/0002_low_tinkerer.sql", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0003_bizarre_serpent_society.sql", import.meta.url), "utf8"),
   ]);
   assert.match(worker, /stream:\s*true/);
   assert.match(worker, /response\.output_text\.delta/);
@@ -41,8 +42,11 @@ test("includes durable, resumable workflow steps and live streaming UI", async (
   assert.match(page, /new EventSource/);
   assert.match(page, /draft_delta/);
   assert.match(page, /\/advance/);
+  assert.match(page, /ReactMarkdown/);
+  assert.match(page, /草稿版本與總編意見/);
   assert.match(eventMigration, /CREATE TABLE `workflow_events`/);
   assert.match(eventMigration, /CREATE UNIQUE INDEX `workflow_events_sequence_idx`/);
   assert.match(leaseMigration, /research_gaps_json/);
   assert.match(leaseMigration, /lease_expires_at/);
+  assert.match(draftMigration, /drafts_json/);
 });

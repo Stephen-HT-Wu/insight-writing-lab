@@ -13,6 +13,7 @@ export const workflows = sqliteTable("workflows", {
   reviewsJson: text("reviews_json").notNull().default("[]"),
   unresolvedJson: text("unresolved_json").notNull().default("[]"),
   researchGapsJson: text("research_gaps_json").notNull().default("[]"),
+  draftsJson: text("drafts_json").notNull().default("[]"),
   leaseToken: text("lease_token"),
   leaseExpiresAt: text("lease_expires_at"),
   error: text("error"),
