@@ -24,18 +24,25 @@ test("server-renders the Insight Writing Lab product", async () => {
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/);
 });
 
-test("includes durable workflow events and live streaming UI", async () => {
-  const [worker, page, migration] = await Promise.all([
+test("includes durable, resumable workflow steps and live streaming UI", async () => {
+  const [worker, page, eventMigration, leaseMigration] = await Promise.all([
     readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../drizzle/0001_nifty_azazel.sql", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0002_low_tinkerer.sql", import.meta.url), "utf8"),
   ]);
   assert.match(worker, /stream:\s*true/);
   assert.match(worker, /response\.output_text\.delta/);
   assert.match(worker, /text\/event-stream/);
   assert.match(worker, /workflow_events/);
+  assert.match(worker, /advanceWorkflow/);
+  assert.match(worker, /lease_expires_at/);
+  assert.doesNotMatch(worker, /waitUntil\(runWorkflow/);
   assert.match(page, /new EventSource/);
   assert.match(page, /draft_delta/);
-  assert.match(migration, /CREATE TABLE `workflow_events`/);
-  assert.match(migration, /CREATE UNIQUE INDEX `workflow_events_sequence_idx`/);
+  assert.match(page, /\/advance/);
+  assert.match(eventMigration, /CREATE TABLE `workflow_events`/);
+  assert.match(eventMigration, /CREATE UNIQUE INDEX `workflow_events_sequence_idx`/);
+  assert.match(leaseMigration, /research_gaps_json/);
+  assert.match(leaseMigration, /lease_expires_at/);
 });

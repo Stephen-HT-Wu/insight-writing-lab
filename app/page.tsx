@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Source = { title: string; url: string; authority: string };
 type Review = { decision: string; summary: string; strengths: string[]; issues: Array<{ severity: string; category: string; problem: string; required_change: string }> };
@@ -17,6 +17,7 @@ const statusLabel: Record<string, string> = {
 
 function labelStatus(status: string) {
   if (status.startsWith("editing_")) return `總編審稿 ${status.split("_")[1]}`;
+  if (status.startsWith("researching_revision_")) return `修訂補查 ${status.split("_")[2]}`;
   if (status.startsWith("revising_")) return `作者修訂 ${status.split("_")[1]}`;
   return statusLabel[status] || status;
 }
@@ -30,6 +31,7 @@ export default function Home() {
   const [message, setMessage] = useState("");
   const [liveDraft, setLiveDraft] = useState("");
   const [liveEvents, setLiveEvents] = useState<LiveEvent[]>([]);
+  const advancing = useRef(new Set<string>());
 
   const load = useCallback(async () => {
     try {
@@ -37,12 +39,27 @@ export default function Home() {
       if (!response.ok) return;
       const data = await response.json() as Workflow[];
       setItems(data);
-      setSelectedId((current) => current || data[0]?.id);
+      setSelectedId((current) => current && data.some((item) => item.id === current) ? current : data[0]?.id);
     } catch { /* local preview may not have D1 ready yet */ }
   }, []);
 
   useEffect(() => { const initial = window.setTimeout(load, 0); const timer = setInterval(load, 4000); return () => { clearTimeout(initial); clearInterval(timer); }; }, [load]);
   const selected = useMemo(() => items.find((item) => item.id === selectedId), [items, selectedId]);
+
+  useEffect(() => {
+    const next = items.find((item) => !["finalized", "failed"].includes(item.status) && !advancing.current.has(item.id));
+    if (!next) return;
+    const timer = window.setTimeout(async () => {
+      advancing.current.add(next.id);
+      try {
+        const response = await fetch(`/api/workflows/${next.id}/advance`, { method: "POST" });
+        if (response.status !== 202) await load();
+      } finally {
+        advancing.current.delete(next.id);
+      }
+    }, 150);
+    return () => clearTimeout(timer);
+  }, [items, load]);
 
   useEffect(() => {
     if (!selectedId) return;

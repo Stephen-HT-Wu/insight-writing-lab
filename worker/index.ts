@@ -32,6 +32,12 @@ type WriterResult = { title: string; thesis: string; markdown: string; research_
 type ReviewIssue = { severity: string; category: string; problem: string; required_change: string };
 type Review = { decision: "pass" | "minor_revision" | "major_revision"; summary: string; strengths: string[]; issues: ReviewIssue[]; research_queries: string[] };
 type WorkflowEventType = "status" | "research" | "draft_reset" | "draft_delta" | "review" | "completed" | "error";
+type WorkflowRow = {
+  id: string; topic: string; brief: string; status: string; revision_count: number;
+  title: string | null; thesis: string | null; markdown: string | null;
+  sources_json: string; reviews_json: string; unresolved_json: string; research_gaps_json: string;
+  lease_token: string | null; lease_expires_at: string | null; error: string | null;
+};
 
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), {
   status,
@@ -52,6 +58,9 @@ async function ensureDb(db: D1Database) {
       sources_json TEXT NOT NULL DEFAULT '[]',
       reviews_json TEXT NOT NULL DEFAULT '[]',
       unresolved_json TEXT NOT NULL DEFAULT '[]',
+      research_gaps_json TEXT NOT NULL DEFAULT '[]',
+      lease_token TEXT,
+      lease_expires_at TEXT,
       error TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -84,9 +93,12 @@ function rowToWorkflow(row: Record<string, unknown>) {
     sources: JSON.parse(String(row.sources_json || "[]")),
     reviews: JSON.parse(String(row.reviews_json || "[]")),
     unresolved: JSON.parse(String(row.unresolved_json || "[]")),
+    research_gaps: JSON.parse(String(row.research_gaps_json || "[]")),
     sources_json: undefined,
     reviews_json: undefined,
     unresolved_json: undefined,
+    research_gaps_json: undefined,
+    lease_token: undefined,
   };
 }
 
@@ -245,65 +257,135 @@ function evidencePacket(sources: Source[]) {
 const writerInstructions = `${writerSkill}\n\n${sourcePolicy}\n\n${argumentation}\n\nReturn JSON only. Write in Traditional Chinese unless the brief explicitly requests another language.`;
 const editorInstructions = `${editorSkill}\n\n${reviewRubric}\n\nReturn JSON only. Review in Traditional Chinese.`;
 
-async function runWorkflow(env: Env, id: string, topic: string, brief: string) {
-  const now = () => new Date().toISOString();
-  const updateStatus = async (status: string, message: string) => {
-    await env.DB.prepare("UPDATE workflows SET status = ?, updated_at = ? WHERE id = ?").bind(status, now(), id).run();
-    await emitEvent(env.DB, id, "status", status, message);
-  };
-  const streamArticle = async (phase: string, prompt: string) => {
-    await emitEvent(env.DB, id, "draft_reset", phase, "");
-    return modelJsonStream<WriterResult>(env, writerInstructions, prompt, (delta) => emitEvent(env.DB, id, "draft_delta", phase, delta));
-  };
+const parseArray = <T,>(value: string | null | undefined): T[] => JSON.parse(value || "[]") as T[];
+const mergeSources = (current: Source[], extra: Source[], limit: number) =>
+  [...new Map([...current, ...extra].map((source) => [source.url, source])).values()].slice(0, limit);
+
+async function setStatus(env: Env, id: string, status: string, message: string) {
+  await env.DB.prepare("UPDATE workflows SET status = ?, error = NULL, updated_at = ? WHERE id = ?")
+    .bind(status, new Date().toISOString(), id).run();
+  await emitEvent(env.DB, id, "status", status, message);
+}
+
+async function streamArticle(env: Env, id: string, phase: string, prompt: string) {
+  await emitEvent(env.DB, id, "draft_reset", phase, "");
+  return modelJsonStream<WriterResult>(env, writerInstructions, prompt, (delta) => emitEvent(env.DB, id, "draft_delta", phase, delta));
+}
+
+async function saveArticle(env: Env, id: string, article: WriterResult) {
+  await env.DB.prepare("UPDATE workflows SET title = ?, thesis = ?, markdown = ?, unresolved_json = ?, research_gaps_json = ?, updated_at = ? WHERE id = ?")
+    .bind(article.title, article.thesis, article.markdown, JSON.stringify(article.unresolved || []), JSON.stringify(article.research_gaps || []), new Date().toISOString(), id).run();
+}
+
+async function finalizeWorkflow(env: Env, row: WorkflowRow) {
+  const reviews = parseArray<Review>(row.reviews_json);
+  const unresolved = [...new Set([
+    ...parseArray<string>(row.unresolved_json),
+    ...(reviews.at(-1)?.decision === "pass" ? [] : reviews.at(-1)?.issues.map((issue) => issue.problem) || []),
+  ])];
+  await env.DB.prepare("UPDATE workflows SET status = 'finalized', unresolved_json = ?, lease_token = NULL, lease_expires_at = NULL, error = NULL, updated_at = ? WHERE id = ?")
+    .bind(JSON.stringify(unresolved), new Date().toISOString(), row.id).run();
+  await emitEvent(env.DB, row.id, "completed", "finalized", { title: row.title, revision_count: row.revision_count });
+}
+
+async function claimWorkflow(env: Env, row: WorkflowRow) {
+  const token = crypto.randomUUID();
+  const now = new Date();
+  const expires = new Date(now.getTime() + 10 * 60_000).toISOString();
+  await env.DB.prepare("UPDATE workflows SET lease_token = ?, lease_expires_at = ? WHERE id = ? AND status = ? AND (lease_expires_at IS NULL OR lease_expires_at < ?)")
+    .bind(token, expires, row.id, row.status, now.toISOString()).run();
+  const claimed = await env.DB.prepare("SELECT lease_token FROM workflows WHERE id = ?").bind(row.id).first<{ lease_token: string | null }>();
+  return claimed?.lease_token === token ? token : null;
+}
+
+async function advanceWorkflow(env: Env, id: string) {
+  let row = await env.DB.prepare("SELECT * FROM workflows WHERE id = ?").bind(id).first<WorkflowRow>();
+  if (!row) return { status: 404, body: { error: "找不到任務" } };
+  if (["finalized", "failed"].includes(row.status)) return { status: 200, body: { id, status: row.status } };
+  const leaseToken = await claimWorkflow(env, row);
+  if (!leaseToken) return { status: 202, body: { id, status: row.status, busy: true } };
+
   try {
-    await updateStatus("researching", "正在從權威研究、官方統計與反方觀點建立證據基礎");
-    let sources = await tavilySearch(env, [
-      `${topic} authoritative research evidence`,
-      `${topic} official statistics primary sources`,
-      `${topic} strongest criticism counterargument`,
-      `${topic} recent systematic review expert analysis`,
-    ]);
-    await emitEvent(env.DB, id, "research", "researching", { message: `已整理 ${sources.length} 個研究來源`, sources: sources.slice(0, 8).map(({ title, url, authority }) => ({ title, url, authority })) });
+    let sources = parseArray<Source>(row.sources_json);
+    let reviews = parseArray<Review>(row.reviews_json);
 
-    await updateStatus("drafting", "寫作者正在根據證據撰寫初稿");
-    let article = await streamArticle("drafting", `TOPIC:\n${topic}\n\nBRIEF:\n${brief}\n\nEVIDENCE CARDS:\n${evidencePacket(sources)}`);
-
-    if (article.research_gaps?.length) {
-      await updateStatus("researching_gaps", `初稿提出 ${article.research_gaps.length} 個證據缺口，正在補查`);
-      const extra = await tavilySearch(env, article.research_gaps);
-      sources = [...new Map([...sources, ...extra].map((source) => [source.url, source])).values()].slice(0, 24);
-      await emitEvent(env.DB, id, "research", "researching_gaps", { message: `補查完成，目前共有 ${sources.length} 個來源` });
-      await updateStatus("redrafting_with_evidence", "寫作者正在把補充證據整合進文章");
-      article = await streamArticle("redrafting_with_evidence", `Rewrite the draft after resolving its research gaps.\n\nTOPIC:\n${topic}\n\nBRIEF:\n${brief}\n\nPRIOR DRAFT:\n${article.markdown}\n\nEVIDENCE CARDS:\n${evidencePacket(sources)}`);
-    }
-
-    const reviews: Review[] = [];
-    let revisionCount = 0;
-    while (revisionCount < 3) {
-      await updateStatus(`editing_${revisionCount + 1}`, `獨立總編正在進行第 ${revisionCount + 1} 輪審稿`);
-      const review = await modelJson<Review>(env, editorInstructions, `TOPIC:\n${topic}\n\nARTICLE:\n${article.markdown}\n\nAVAILABLE SOURCES:\n${evidencePacket(sources)}`);
-      reviews.push(review);
-      await emitEvent(env.DB, id, "review", `editing_${revisionCount + 1}`, { decision: review.decision, summary: review.summary, issue_count: review.issues?.length || 0 });
-      if (review.decision === "pass") break;
-      revisionCount += 1;
-      if (review.research_queries?.length) {
-        await emitEvent(env.DB, id, "research", `editing_${revisionCount}`, `總編要求補查 ${review.research_queries.length} 個問題`);
-        const extra = await tavilySearch(env, review.research_queries);
-        sources = [...new Map([...sources, ...extra].map((source) => [source.url, source])).values()].slice(0, 28);
+    if (row.status === "queued" || row.status === "researching") {
+      await setStatus(env, id, "researching", "正在從權威研究、官方統計與反方觀點建立證據基礎");
+      sources = await tavilySearch(env, [
+        `${row.topic} authoritative research evidence`,
+        `${row.topic} official statistics primary sources`,
+        `${row.topic} strongest criticism counterargument`,
+        `${row.topic} recent systematic review expert analysis`,
+      ]);
+      await env.DB.prepare("UPDATE workflows SET sources_json = ? WHERE id = ?").bind(JSON.stringify(sources), id).run();
+      await emitEvent(env.DB, id, "research", "researching", { message: `已整理 ${sources.length} 個研究來源`, sources: sources.slice(0, 8).map(({ title, url, authority }) => ({ title, url, authority })) });
+      await setStatus(env, id, "drafting", "研究已保存；下一步將撰寫初稿");
+    } else if (row.status === "drafting") {
+      if (!sources.length) {
+        await setStatus(env, id, "researching", "找不到已保存的研究資料，將重新研究");
+      } else {
+        const article = await streamArticle(env, id, "drafting", `TOPIC:\n${row.topic}\n\nBRIEF:\n${row.brief}\n\nEVIDENCE CARDS:\n${evidencePacket(sources)}`);
+        await saveArticle(env, id, article);
+        await setStatus(env, id, article.research_gaps?.length ? "researching_gaps" : "editing_1", article.research_gaps?.length ? `初稿已保存；下一步補查 ${article.research_gaps.length} 個證據缺口` : "初稿已保存；下一步交由獨立總編審稿");
       }
-      await updateStatus(`revising_${revisionCount}`, `寫作者正在根據總編意見進行第 ${revisionCount} 次修訂`);
-      article = await streamArticle(`revising_${revisionCount}`, `Revise the article in response to the independent editor. Preserve sound reasoning; address substantive issues. This is revision ${revisionCount} of at most 3.\n\nTOPIC:\n${topic}\n\nBRIEF:\n${brief}\n\nCURRENT ARTICLE:\n${article.markdown}\n\nEDITOR REVIEW:\n${JSON.stringify(review)}\n\nEVIDENCE CARDS:\n${evidencePacket(sources)}`);
+    } else if (row.status === "researching_gaps") {
+      const gaps = parseArray<string>(row.research_gaps_json);
+      const extra = gaps.length ? await tavilySearch(env, gaps) : [];
+      sources = mergeSources(sources, extra, 24);
+      await env.DB.prepare("UPDATE workflows SET sources_json = ? WHERE id = ?").bind(JSON.stringify(sources), id).run();
+      await emitEvent(env.DB, id, "research", "researching_gaps", { message: `補查已保存，目前共有 ${sources.length} 個來源` });
+      await setStatus(env, id, "redrafting_with_evidence", "下一步將補充證據整合進文章");
+    } else if (row.status === "redrafting_with_evidence") {
+      const article = await streamArticle(env, id, row.status, `Rewrite the draft after resolving its research gaps.\n\nTOPIC:\n${row.topic}\n\nBRIEF:\n${row.brief}\n\nPRIOR DRAFT:\n${row.markdown || ""}\n\nEVIDENCE CARDS:\n${evidencePacket(sources)}`);
+      await saveArticle(env, id, article);
+      await setStatus(env, id, "editing_1", "證據版草稿已保存；下一步交由獨立總編審稿");
+    } else if (/^editing_\d+$/.test(row.status)) {
+      const round = Number(row.status.split("_")[1]);
+      const review = await modelJson<Review>(env, editorInstructions, `TOPIC:\n${row.topic}\n\nARTICLE:\n${row.markdown || ""}\n\nAVAILABLE SOURCES:\n${evidencePacket(sources)}`);
+      reviews = [...reviews, review];
+      await env.DB.prepare("UPDATE workflows SET reviews_json = ? WHERE id = ?").bind(JSON.stringify(reviews), id).run();
+      await emitEvent(env.DB, id, "review", row.status, { decision: review.decision, summary: review.summary, issue_count: review.issues?.length || 0 });
+      if (review.decision === "pass") {
+        row = { ...row, reviews_json: JSON.stringify(reviews) };
+        await finalizeWorkflow(env, row);
+      } else {
+        await env.DB.prepare("UPDATE workflows SET revision_count = ? WHERE id = ?").bind(round, id).run();
+        await setStatus(env, id, review.research_queries?.length ? `researching_revision_${round}` : `revising_${round}`, review.research_queries?.length ? `總編第 ${round} 輪意見已保存；下一步補查 ${review.research_queries.length} 個問題` : `總編第 ${round} 輪意見已保存；下一步進行修訂`);
+      }
+    } else if (/^researching_revision_\d+$/.test(row.status)) {
+      const round = Number(row.status.split("_")[2]);
+      const queries = reviews.at(-1)?.research_queries || [];
+      const extra = queries.length ? await tavilySearch(env, queries) : [];
+      sources = mergeSources(sources, extra, 28);
+      await env.DB.prepare("UPDATE workflows SET sources_json = ? WHERE id = ?").bind(JSON.stringify(sources), id).run();
+      await emitEvent(env.DB, id, "research", row.status, { message: `第 ${round} 輪補查已保存，目前共有 ${sources.length} 個來源` });
+      await setStatus(env, id, `revising_${round}`, `下一步依第 ${round} 輪總編意見修訂文章`);
+    } else if (/^revising_\d+$/.test(row.status)) {
+      const round = Number(row.status.split("_")[1]);
+      const review = reviews.at(-1);
+      const article = await streamArticle(env, id, row.status, `Revise the article in response to the independent editor. Preserve sound reasoning; address substantive issues. This is revision ${round} of at most 3.\n\nTOPIC:\n${row.topic}\n\nBRIEF:\n${row.brief}\n\nCURRENT ARTICLE:\n${row.markdown || ""}\n\nEDITOR REVIEW:\n${JSON.stringify(review)}\n\nEVIDENCE CARDS:\n${evidencePacket(sources)}`);
+      await saveArticle(env, id, article);
+      if (round >= 3) {
+        row = { ...row, title: article.title, thesis: article.thesis, markdown: article.markdown, unresolved_json: JSON.stringify(article.unresolved || []), reviews_json: JSON.stringify(reviews), revision_count: round };
+        await finalizeWorkflow(env, row);
+      } else {
+        await setStatus(env, id, `editing_${round + 1}`, `第 ${round} 次修訂已保存；下一步進行第 ${round + 1} 輪審稿`);
+      }
+    } else {
+      throw new Error(`未知的工作階段：${row.status}`);
     }
 
-    const unresolved = [...new Set([...(article.unresolved || []), ...(reviews.at(-1)?.decision === "pass" ? [] : reviews.at(-1)?.issues.map((issue) => issue.problem) || [])])];
-    await env.DB.prepare(`UPDATE workflows SET status = ?, revision_count = ?, title = ?, thesis = ?, markdown = ?, sources_json = ?, reviews_json = ?, unresolved_json = ?, updated_at = ? WHERE id = ?`)
-      .bind("finalized", revisionCount, article.title, article.thesis, article.markdown, JSON.stringify(sources), JSON.stringify(reviews), JSON.stringify(unresolved), now(), id).run();
-    await emitEvent(env.DB, id, "completed", "finalized", { title: article.title, revision_count: revisionCount });
+    await env.DB.prepare("UPDATE workflows SET lease_token = NULL, lease_expires_at = NULL WHERE id = ? AND lease_token = ?")
+      .bind(id, leaseToken).run();
+    const latest = await env.DB.prepare("SELECT status FROM workflows WHERE id = ?").bind(id).first<{ status: string }>();
+    return { status: 200, body: { id, status: latest?.status || row.status } };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await env.DB.prepare("UPDATE workflows SET status = ?, error = ?, updated_at = ? WHERE id = ?")
-      .bind("failed", message, now(), id).run();
-    await emitEvent(env.DB, id, "error", "failed", message);
+    const retryAt = new Date(Date.now() + 60_000).toISOString();
+    await env.DB.prepare("UPDATE workflows SET lease_token = NULL, lease_expires_at = ?, error = ?, updated_at = ? WHERE id = ?")
+      .bind(retryAt, message, new Date().toISOString(), id).run();
+    await emitEvent(env.DB, id, "status", row.status, `此階段暫時失敗，稍後可從 ${row.status} 重試：${message}`);
+    return { status: 503, body: { id, status: row.status, retry_at: retryAt, error: message } };
   }
 }
 
@@ -341,7 +423,7 @@ function workflowEventStream(env: Env, workflowId: string, request: Request) {
   });
 }
 
-async function handleApi(request: Request, env: Env, ctx: ExecutionContext) {
+async function handleApi(request: Request, env: Env) {
   await ensureDb(env.DB);
   const url = new URL(request.url);
   const eventMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)\/events$/);
@@ -359,13 +441,26 @@ async function handleApi(request: Request, env: Env, ctx: ExecutionContext) {
     const stamp = new Date().toISOString();
     await env.DB.prepare("INSERT INTO workflows (id, topic, brief, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
       .bind(id, topic, body.brief?.trim() || "撰寫一篇思慮嚴謹、思辨且具有洞見的繁體中文文章。", "queued", stamp, stamp).run();
-    ctx.waitUntil(runWorkflow(env, id, topic, body.brief || ""));
     return json({ id, status: "queued" }, 202);
+  }
+  const advanceMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)\/advance$/);
+  if (advanceMatch && request.method === "POST") {
+    const result = await advanceWorkflow(env, advanceMatch[1]);
+    return json(result.body, result.status);
   }
   const match = url.pathname.match(/^\/api\/workflows\/([^/]+)$/);
   if (match && request.method === "GET") {
     const row = await env.DB.prepare("SELECT * FROM workflows WHERE id = ?").bind(match[1]).first<Record<string, unknown>>();
     return row ? json(rowToWorkflow(row)) : json({ error: "找不到任務" }, 404);
+  }
+  if (match && request.method === "DELETE") {
+    const existing = await env.DB.prepare("SELECT id FROM workflows WHERE id = ?").bind(match[1]).first<{ id: string }>();
+    if (!existing) return json({ error: "找不到任務" }, 404);
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM workflow_events WHERE workflow_id = ?").bind(match[1]),
+      env.DB.prepare("DELETE FROM workflows WHERE id = ?").bind(match[1]),
+    ]);
+    return json({ deleted: true, id: match[1] });
   }
   return json({ error: "Not found" }, 404);
 }
@@ -373,7 +468,7 @@ async function handleApi(request: Request, env: Env, ctx: ExecutionContext) {
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname.startsWith("/api/")) return handleApi(request, env, ctx);
+    if (url.pathname.startsWith("/api/")) return handleApi(request, env);
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
       return handleImageOptimization(request, {
